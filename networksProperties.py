@@ -7,7 +7,7 @@ Try to write a program that actually computes the upper set of subnetworks of a 
 approximate f(x) on [a,b] to a precision of some specified epsilon>0 (i.e. subnetworks of N such that
 |N(x)-f(x)|< epsilon for all x in [a,b]).
 '''
-
+#rough draft
 
 '''
 #example of weights for net w/ 1 input node, 1 output node, 2 hidden layers of width 2.
