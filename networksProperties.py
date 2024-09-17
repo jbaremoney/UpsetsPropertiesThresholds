@@ -8,6 +8,7 @@ approximate f(x) on [a,b] to a precision of some specified epsilon>0 (i.e. subne
 |N(x)-f(x)|< epsilon for all x in [a,b]).
 '''
 
+
 '''
 #example of weights for net w/ 1 input node, 1 output node, 2 hidden layers of width 2.
 
@@ -21,19 +22,23 @@ approximate f(x) on [a,b] to a precision of some specified epsilon>0 (i.e. subne
 '''
 
 import numpy as np
+import copy
+
 
 def relu(x):
     return np.maximum(0, x)
 
 class BinaryNeuralNet:
 
-    def __init__(self, n, l, outputSize=1):
-        self.n = n
+    def __init__(self, n_hidden, l, weights=[], outputSize=1):
+        self.n = n_hidden
         self.l = l
+        self.weights = weights
 
-        self.weights = [np.random.choice([-1, 1], (n, n)) for _ in range(l - 1)] #hidden layer weight matrices nxn
-        self.weights.insert(0, np.random.choice([-1, 1], (1, n)))  # first layer weight matrix, 1xn
-        self.weights.append(np.random.choice([-1, 1], (n, outputSize)))  # output layer weight matrix, nxoutputsz
+        # Weights: input layer (n_hidden, 1), hidden layers (n_hidden, n_hidden), output layer (outputSize, n_hidden)
+        self.weights = [np.random.choice([-1, 1], (n_hidden, 1))]  # First layer weight matrix, n_hidden x 1
+        self.weights += [np.random.choice([-1, 1], (n_hidden, n_hidden)) for _ in range(l - 1)]  # Hidden layers
+        self.weights.append(np.random.choice([-1, 1], (outputSize, n_hidden)))  # Output layer, outputSize x n_hidden
 
 
     def forward(self, x):
@@ -42,25 +47,75 @@ class BinaryNeuralNet:
             output = relu(np.dot(self.weights[i], output))
         return np.dot(self.weights[-1], output)
 
+    def generatePossWeights(self):
+        possibleWeights = []
 
-N = BinaryNeuralNet(n=3, l=3) #given network
-f = BinaryNeuralNet(n=3, l=3) #target network
+        # iterate layers
+        for i in range(len(self.weights)):
+            # iterate rows
+            for row in range(len(self.weights[i])):
+                # iterate columns
+                for col in range(len(self.weights[i][row])):
+                    # deep copy
+                    newWeights = copy.deepcopy(self.weights)
 
-
-print(N.weights)
-#output
-'''
-[array([[ 1,  1, -1]]), array([[-1,  1,  1],
-       [ 1, -1,  1],
-       [-1,  1, -1]]), array([[ 1,  1, -1],
-       [-1,  1,  1],
-       [-1,  1,  1]]), array([[-1],
-       [ 1],
-       [-1]])]
-'''
+                    # flip sign
+                    newWeights[i][row][col] *= -1
 
 
+                    possibleWeights.append(newWeights)
+
+        return possibleWeights
+
+
+N = BinaryNeuralNet(n_hidden=2, l=2) #given network
+f = BinaryNeuralNet(n_hidden=2, l=2) #target network
 
 
 
+
+
+# good network is one that approximates goal within epsilon
+def goodNets(goalNet, given, epsilon=2):
+    goal = goalNet.forward(3)  # fix .forward (no magic numbers)
+    givenWeightCombs = given.generatePossWeights()
+    goodNets = []
+
+    for i in givenWeightCombs:
+        currentNet = BinaryNeuralNet(n_hidden=2, l=2, weights=i)
+        output = currentNet.forward(3)
+        error = np.mean(np.abs(output - goal)) # mean absolute error
+
+
+        if abs(error) < epsilon:
+            goodNets.append(currentNet)
+
+    return goodNets
+
+
+# minimal network will be the one with most zeroed out weights
+def findMinNet(listOfNets):
+    minNet = None
+    maxZeroCt = -1
+
+    for net in listOfNets:
+        zeroCt = 0
+
+        # iterate layers
+        for layer in net.weights:
+            # counting 0's
+            zeroCt += np.sum(layer == 0)
+
+        # check if most 0's
+        if zeroCt > maxZeroCt:
+            maxZeroCt = zeroCt
+            minNet = net
+
+    return minNet
+
+goodNetworks = goodNets(f, N)
+print(goodNetworks)
+minNet = findMinNet(goodNetworks)
+
+print(minNet.weights)
 
