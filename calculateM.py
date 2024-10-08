@@ -51,3 +51,7 @@ def getM(minElems):
         containDict.pop(max_I)
 
     return len(minElems)
+
+
+
+

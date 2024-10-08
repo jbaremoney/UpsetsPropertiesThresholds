@@ -24,7 +24,7 @@ def find_p_for_half_sum(sizes, tolerance=.0001):
 
 
 #is it upper or lower bound
-sizeArr = [1, 2, 3]
+sizeArr = [10]
 sizeArrCh = [3, 3, 3]
 print(find_p_for_half_sum(sizeArr))
 print(find_p_for_half_sum(sizeArrCh))
