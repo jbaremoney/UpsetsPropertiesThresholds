@@ -36,9 +36,7 @@ class BinaryNeuralNet:
         self.weights = weights
 
         # Weights: input layer (n_hidden, 1), hidden layers (n_hidden, n_hidden), output layer (outputSize, n_hidden)
-        # not sure if this will work with binary networks, no different networks will contain each other
-        # since the only way you can be greater than / contain another network is having a weight where the other
-        # network has a 0 weight there.
+
         self.weights = [np.random.choice([0, 1], (n_hidden, 1))]  # First layer weight matrix, n_hidden x 1
         self.weights += [np.random.choice([0, 1], (n_hidden, n_hidden)) for _ in range(l - 1)]  # Hidden layers
         self.weights.append(np.random.choice([0, 1], (outputSize, n_hidden)))  # Output layer, outputSize x n_hidden
@@ -99,26 +97,17 @@ def goodNets(goalNet, given, epsilon=2):
 
 
 # minimal network will be the one with most zeroed out weights ***
-'''
- this is not defined quite correctly. a better definition for minimal networks as follows:
- think of all of the edges as elements in a set. then the minimal networks are the working networks that do not contain
- any other working network. and all the other sets in the upper set contain some working network.
- 
- so we should store the network as a set of weights as such, so we can use the minimal elements finder already made.
- 
- this can be done using matrices to represent weights
- 
-'''
+
 def contains(A, B):
     """
     Check if network A contains network B.
     A contains B if all nonzero weights in B are also nonzero in A,
-    but A can have additional 1s where B has 0s.
+    but A can have additional nonzeros where B has 0s.
     """
     # iterate through corresponding weight matrices in A and B
     for weight_A, weight_B in zip(A, B):
-        # check that A has 1's everywhere B has 1's
-        if not np.all((weight_B == 1) <= (weight_A == 1)):
+        # check that A has nonzeros everywhere B has nonzeros
+        if not np.all((weight_B != 0) <= (weight_A != 0)):
             return False
     return True
 
