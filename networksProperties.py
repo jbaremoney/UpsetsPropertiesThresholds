@@ -24,23 +24,24 @@ approximate f(x) on [a,b] to a precision of some specified epsilon>0 (i.e. subne
 import numpy as np
 import copy
 
-
 def relu(x):
     return np.maximum(0, x)
-
-class BinaryNeuralNet:
-
-    def __init__(self, n_hidden, l, weights=[], outputSize=1):
+class NeuralNet: #binary default, uniform default
+    def init(self, n_hidden, l, weights=[], outputSize=1, weightInit="given", mean=0, stdDev=1):
         self.n = n_hidden
         self.l = l
         self.weights = weights
+        self.outputSize = outputSize
+        if weightInit == "binary":
+            self.weights = [np.random.choice([0, 1], (n_hidden, 1))]  # First layer weight matrix, n_hidden x 1
+            self.weights += [np.random.choice([0, 1], (n_hidden, n_hidden)) for _ in range(l - 1)]  # Hidden layers
+            self.weights.append(np.random.choice([0, 1], (outputSize, n_hidden)))  # Output layer, outputSize x n_hidden
 
-        # Weights: input layer (n_hidden, 1), hidden layers (n_hidden, n_hidden), output layer (outputSize, n_hidden)
-
-        self.weights = [np.random.choice([0, 1], (n_hidden, 1))]  # First layer weight matrix, n_hidden x 1
-        self.weights += [np.random.choice([0, 1], (n_hidden, n_hidden)) for _ in range(l - 1)]  # Hidden layers
-        self.weights.append(np.random.choice([0, 1], (outputSize, n_hidden)))  # Output layer, outputSize x n_hidden
-
+        elif weightInit == "normal":
+            self.weights = [np.random.normal(loc=mean, scale=stdDev, size=(n_hidden, 1))]  # input layer
+            for _ in range(l - 1):  # hidden layers
+                self.weights.append(np.random.normal(loc=mean, scale=stdDev, size=(n_hidden, n_hidden)))
+            self.weights.append(np.random.normal(loc=mean, scale=stdDev, size=(outputSize, n_hidden))) #output
 
     def forward(self, x):
         output = x
@@ -48,84 +49,47 @@ class BinaryNeuralNet:
             output = relu(np.dot(self.weights[i], output))
         return np.dot(self.weights[-1], output)
 
-    def generatePossWeights(self):
-        possibleWeights = []
+    def isGoodNetwork(self, goalNet, epsilon, x=1):
+        if abs(self.forward(x) - goalNet.forward(x)) <= epsilon:
+            return True
+        return False
 
-        # iterate layers
-        for i in range(len(self.weights)):
-            # iterate rows
-            for row in range(len(self.weights[i])):
-                # iterate columns
-                for col in range(len(self.weights[i][row])):
-                    # deep copy
-                    newWeights = copy.deepcopy(self.weights)
+    def getSubnetworks(self):
+        shape = self.weights.shape
+        numWeights = np.prod(shape)  # Total number of weights
 
-                    if newWeights[i][row][col] == 1:
-                        newWeights[i][row][col] = 0
-                    else:
-                        newWeights[i][row][col] = 1
+        flatWeights = self.weights.flatten()
 
+    def goodNetworks(self, goalNet, epsilon, x=1):
+        goodNetworks = []
+        for network in self.getSubnetworks():
+            if network.isGoodNetwork(goalNet, epsilon, x):
+                goodNetworks.append(network)
+        return goodNetworks
 
-                    possibleWeights.append(newWeights)
+    def contains(self, B):
+        """
+            Check if network A(self) contains network B.
+            A contains B if all nonzero weights in B are also nonzero in A,
+            but A can have additional nonzeros where B has 0s.
+            """
+        # iterate through corresponding weight matrices in A and B
+        for weight_A, weight_B in zip(self.weights, B.weights):
+            # check that A has nonzeros everywhere B has nonzeros
+            if not np.all((weight_B != 0) <= (weight_A != 0)):
+                return False
+        return True
 
-        return possibleWeights
+    def findMinimalNetworks(self, goalNet, epsilon, x=1):
+        sortedUpset = sorted(self.goodNetworks(goalNet, epsilon, x), key=lambda net: sum(np.count_nonzero(w) for w in net))
+        minElems = []
 
+        while sortedUpset:
+            currentNet = sortedUpset.pop(0)
+            # current set is minimal. minimum size all minimal, and then all their supersets are removed
+            minElems.append(currentNet)
 
-N = BinaryNeuralNet(n_hidden=2, l=2) #given network
-f = BinaryNeuralNet(n_hidden=2, l=2) #target network
+            # if current set is a subset of anything in upperset, remove it
+            sortedUpset = [s for s in sortedUpset if not s.contains(currentNet)]
 
-
-
-
-
-# good network is one that approximates goal within epsilon
-def goodNets(goalNet, given, epsilon=2):
-    goal = goalNet.forward(3)  # fix .forward (no magic numbers)
-    givenWeightCombs = given.generatePossWeights()
-    goodNets = []
-
-    for i in givenWeightCombs:
-        currentNet = BinaryNeuralNet(n_hidden=2, l=2, weights=i)
-        output = currentNet.forward(3)
-        error = np.mean(np.abs(output - goal)) # mean absolute error
-
-
-        if abs(error) < epsilon:
-            goodNets.append(currentNet)
-
-    return goodNets
-
-
-# minimal network will be the one with most zeroed out weights ***
-
-def contains(A, B):
-    """
-    Check if network A contains network B.
-    A contains B if all nonzero weights in B are also nonzero in A,
-    but A can have additional nonzeros where B has 0s.
-    """
-    # iterate through corresponding weight matrices in A and B
-    for weight_A, weight_B in zip(A, B):
-        # check that A has nonzeros everywhere B has nonzeros
-        if not np.all((weight_B != 0) <= (weight_A != 0)):
-            return False
-    return True
-
-def findMinNets(workingNets): # from minimalElements.py
-    sortedUpset = sorted(workingNets, key=lambda net: sum(np.count_nonzero(w) for w in net))
-
-    minElems = []
-
-    while sortedUpset:
-        currentNet = sortedUpset.pop(0)
-        # current set is minimal. minimum size all minimal, and then all their supersets are removed
-        minElems.append(currentNet)
-
-        # if current set is a subset of anything in upperset, remove it
-        sortedUpset = [s for s in sortedUpset if not contains(s, currentNet)]
-
-    return minElems
-
-
-
-
+        return minElems
