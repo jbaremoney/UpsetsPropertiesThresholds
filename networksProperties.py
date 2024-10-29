@@ -27,11 +27,13 @@ import copy
 def relu(x):
     return np.maximum(0, x)
 class NeuralNet: #binary default, uniform default
-    def init(self, n_hidden, l, weights=[], outputSize=1, weightInit="given", mean=0, stdDev=1):
+    def init(self, n_hidden, l, outputSize=1, weightInit="given", mean=0, stdDev=1):
         self.n = n_hidden
         self.l = l
-        self.weights = weights
         self.outputSize = outputSize
+
+        #if weightInit == "given":
+            #self.weights = weights # fix this
         if weightInit == "binary":
             self.weights = [np.random.choice([0, 1], (n_hidden, 1))]  # First layer weight matrix, n_hidden x 1
             self.weights += [np.random.choice([0, 1], (n_hidden, n_hidden)) for _ in range(l - 1)]  # Hidden layers
