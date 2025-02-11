@@ -120,15 +120,13 @@ class LinearSubnet(nn.Linear):
         # this masks the nonzero weights
         wPre = self.weight_values * adj
 
-        # getting shape of weight matrix
-        w = torch.zeros_like(self.initial_weight)
+        w_sparse = torch.sparse_coo_tensor( #using chatgpt idea, slowed way down
+            torch.stack(self.weight_indices),  # Stack row & col indices
+            wPre,  # The values after pruning
+            size=self.initial_weight.shape  # Shape of full weight matrix
+        )
 
-        # setting each weight to updated, see weight_indices variable for comment
-        w[self.weight_indices] = wPre  # vectorized assignment instead of loop
-
-        x = F.linear(x, w)
-
-        return x
+        return F.linear(x, w_sparse.to_dense(), self.bias)
 
 
 # Our maskable replacement for the standard 2d convolutional layer in torch.
