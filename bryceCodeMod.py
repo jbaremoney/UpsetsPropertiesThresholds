@@ -1,217 +1,188 @@
-from os import initgroups
-import torch.nn as nn
-import math
+
 import torch
-from torch import autograd
-import torch.functional as F
-# The default value of the parameter between 0 and 1 specifying the percentage
-# of the model's weights that will be masked in each layer.
-K = 1.0
+import torch.nn as nn
+
+import torch.autograd as autograd
+import math
 
 
-# Set up signed Kaiming initialization.
-def signed_kaiming_constant_(tensor, a=0, mode='fan_in', nonlinearity='sigmoid', k=1.):
-    # fan_in means how many inputs coming into each neuron for layer
+K= 1.0
+def signed_kaiming_constant_(tensor, a=0, mode='fan_in', nonlinearity='relu', k=1., sparsity =0):
+
     fan = nn.init._calculate_correct_fan(tensor, mode)  # calculating correct fan, depends on shape and type of nn
     gain = nn.init.calculate_gain(nonlinearity, a)
     std = (gain / math.sqrt(fan))
     # scale by (1/sqrt(k))
     if k != 0:
         std *= (1 / math.sqrt(k))
+
     with torch.no_grad():
-        return tensor.uniform_(-std, std)
+        tensor.uniform_(-std, std)
+        if sparsity > 0:
+            mask = (torch.rand_like(tensor) > sparsity).float()  # Keeps (1 - sparsity)% weights
 
+            tensor *= mask
+        return tensor
 
-# A function to retreive a subset of the top k% of the weights by their score.
-# The gradient is estimated by the identity (i.e. it goes "straight-through").
-# See the paper "What's Hidden in a Randomly Weighted Neural Network?" for
-# more details (https://arxiv.org/abs/1911.13299)
-# (this code adapted from https://github.com/iceychris/edge-popup)
 class GetSubnet(autograd.Function):
-    # getSubnet is what generates our mask
-    # so like GetSubnet applied to some network gives mask to apply to network
+
     @staticmethod
-    def forward(ctx, scores, k):  # ctx saves tensor for backwards
-        # scores is a tensor that tells you score for each weight
-        # k tells u fraction of weights to keep
+    def forward(ctx, scores, k):
 
         # Get the subnetwork by sorting the scores and using the top k%
-        out = scores.clone()  # copy of scores
-        _, idx = scores.sort()  # sorting scores as 1d array
-        # idx is sorted list of indexes of scores ascending
-        # ie if index 2 has lowest it would be [2,...]
-        # so we can use these indexes to get the right matrix indices for weight
-
-        j = int((1 - k) * scores.numel())  # calculating num of weights to get rid
+        out = scores.clone()
+        _, idx = scores.flatten().sort()
+        j = int((1-k) * scores.numel())
 
         # flat_out and out access the same memory.
-        flat_out = out  # 1d array of score tensor
-        flat_out[idx[:j]] = 0  # 0 out the weights in bottom 1-k%
-        flat_out[idx[j:]] = 1  # keep the top k percent (mult by 1)
+        flat_out = out.flatten()
+        flat_out[idx[:j]] = 0
+        flat_out[idx[j:]] = 1
 
         return out
 
     @staticmethod
     def backward(ctx, grad):
-        # send the gradient g straight-through on the backward pass.
-        # grad is the just gradient of loss wrt forward pass
-        # also returns none for k because not training k
-        # maybe could train k?
-        return grad, None
 
+        # send the gradient g straight-through on the backward pass.
+        return grad, None
 
 # Our maskable replacement for the standard linear layer in torch.
 # See the paper "What's Hidden in a Randomly Weighted Neural Network?" for
 # more details (https://arxiv.org/abs/1911.13299)
 # (this code adapted from https://github.com/iceychris/edge-popup)
 class LinearSubnet(nn.Linear):
-    # inherits from nn.linear, meaning like fully connected layer but modified
-    # we're adding the k aspect, popup scores
-
-    def __init__(self, in_features, out_features, bias=True, k=K, init=signed_kaiming_constant_, **kwargs):
-        # # of input neurons, # output neurons, bool:include bias, k from above, init method, extra arguments
-
-        # calling parent constructor, makes fully connected layer
-        super(LinearSubnet, self).__init__(in_features, out_features, bias if isinstance(bias, bool) else True,
-                                           **kwargs)
-
+    def __init__(self, in_features, out_features, bias=True, k=K, sparsity=0.5, zeroTrack=0.0,
+                 init=signed_kaiming_constant_, **kwargs):
+        super(LinearSubnet, self).__init__(in_features, out_features, bias=bias, **kwargs)
         self.k = k
-        # init weights
-        if init == signed_kaiming_constant_:
-            init(self.weight, k=k)
+        self.sparsity = sparsity
+        self.zeroTrack = zeroTrack
+
+
+        init(self.weight, k=k, sparsity=sparsity)
+
+        # Save the full initial weight matrix for testing.
+        self.initial_weight = self.weight.clone().detach()
+
+        # Generate and store a full tensor of popup scores (one per weight)
+        self.full_initial_popup_scores = torch.randn_like(self.weight).detach()
+
+        # Create a tracking mask: always track nonzero weights.
+        nonzero_mask = self.weight != 0
+        if zeroTrack > 0:
+            # For the zero weights, select a fraction to track.
+            zero_mask = self.weight == 0
+            # Get indices of zero weights (as a flat index for simplicity)
+            flat_zero_indices = torch.nonzero(zero_mask.view(-1), as_tuple=False).view(-1)
+            num_zero_to_track = int(zeroTrack * flat_zero_indices.numel())
+            # Here we choose deterministically: the first num_zero_to_track indices.
+            selected_zero_indices = flat_zero_indices[:num_zero_to_track]
+            # Build a flat tracking mask (for all weights) that is True for:
+            #  - all nonzero weights, and
+            #  - the selected zero indices.
+            flat_tracking_mask = nonzero_mask.view(-1).clone()
+            # First, set all zero positions to False.
+            flat_tracking_mask[torch.nonzero((self.weight.view(-1) == 0), as_tuple=False).view(-1)] = False
+            # Now mark the selected zero positions as True.
+            flat_tracking_mask[selected_zero_indices] = True
+            # Reshape back to the weight shape.
+            tracking_mask = flat_tracking_mask.view(self.weight.shape)
         else:
-            init(self.weight)
+            tracking_mask = nonzero_mask
 
-        mask = self.weight != 0
+        # Save the tracking mask for later (and for testing)
+        self.tracking_mask = tracking_mask
 
-        # Save only nonzero weight values
-        self.weight_values = nn.Parameter(self.weight[mask])
-        # outputs 1d tensor of nonzero weights
+        # Initialize popup_scores as a parameter using the full initial values, but only for tracked weights
+        self.popup_scores = nn.Parameter(self.full_initial_popup_scores[self.tracking_mask])
+        # Also save these initial popup scores for later testing.
+        self.initial_popup_scores = self.full_initial_popup_scores[self.tracking_mask].clone()
 
-        # weight indices , row index tensor and column index tensor
-        self.weight_indices = torch.nonzero(mask, as_tuple=True)  # store nonzero
-        # (tensor([0, 0, 1, 1, 1, 2, 2]), tensor([1, 3, 0, 3, 4, 2, 4]))
 
-        # initializing popup scores same shape as self.weight_values
-        self.popup_scores = nn.Parameter(torch.randn_like(self.weight_values))
-
-        self.initial_popup_scores = nn.Parameter(self.popup_scores.clone())  # Keep it trainable
-        self.initial_weight = nn.Parameter(self.weight.clone())  # Keep it consistent
-
-        # disable grad for the original parameters
-        # not updating weights during backprop, just determining which weights
-        # to use via popup scores
         self.weight.requires_grad_(False)
         if self.bias is not None:
             self.bias.requires_grad_(False)
 
-    # self.k is the % of weights remaining, a real number in [0,1]
-    # self.popup_scores is a Parameter which has the same shape as self.weight
-    # Gradients to self.weight, self.bias have been turned off.
-    def forward(self, x):
-        # Get the subnetwork by sorting the scores.
-        adj = GetSubnet.apply(self.popup_scores.abs(), self.k)  # applying getSubnet
-        # adj is the mask with only highest k% popup scores kept, others zeroed
-        # PROBLEM: we sorted the popup scores. the corresponding indices didn't
-        # get sorted with it
-        # SOLVED: he used idx for list of indexes, which will preserve our indexes corresponding
+    def update_zeroTrack(self, new_zeroTrack):
+      """
+      Update the popup_scores parameter based on a new zeroTrack value.
+      This function recomputes the tracking mask and resets the popup_scores
+      while keeping the original initializations for the positions that remain.
 
-        # Use only the subnetwork in the forward pass.
-        # this masks the nonzero weights
-        wPre = self.weight_values * adj
+      Only really need this for testing. Basically just supposed to make it so
+      we don't have to reinitialize a new network for each test. Not working as expected.
+      Should decrease the number of trainable parameters when called to decrease zeroTrack.
 
-        w_sparse = torch.sparse_coo_tensor( #using chatgpt idea, slowed way down
-            torch.stack(self.weight_indices),  # Stack row & col indices
-            wPre,  # The values after pruning
-            size=self.initial_weight.shape  # Shape of full weight matrix
-        )
+      This version just gives an error about not
+      """
+      self.zeroTrack = new_zeroTrack
+      nonzero_mask = self.initial_weight != 0
+      if new_zeroTrack > 0:
+        zero_mask = self.initial_weight == 0
+        flat_zero_indices = torch.nonzero(zero_mask.view(-1), as_tuple=False).view(-1)
+        num_zero_to_track = int(new_zeroTrack * flat_zero_indices.numel())
+        selected_zero_indices = flat_zero_indices[:num_zero_to_track]
+        flat_tracking_mask = nonzero_mask.view(-1).clone()
+        flat_tracking_mask[torch.nonzero((self.initial_weight.view(-1) == 0), as_tuple=False).view(-1)] = False
+        flat_tracking_mask[selected_zero_indices] = True
+        tracking_mask = flat_tracking_mask.view(self.initial_weight.shape)
+      else:
+        tracking_mask = nonzero_mask
 
-        return F.linear(x, w_sparse.to_dense(), self.bias)
+      self.tracking_mask = tracking_mask
+      new_popup_init = self.full_initial_popup_scores[self.tracking_mask]
 
+      # Properly replace the popup_scores parameter
+      del self._parameters['popup_scores']
+      self.register_parameter('popup_scores', nn.Parameter(new_popup_init.clone().detach(), requires_grad=True))
 
-# Our maskable replacement for the standard 2d convolutional layer in torch.
-# See the paper "What's Hidden in a Randomly Weighted Neural Network?" for
-# more details (https://arxiv.org/abs/1911.13299)
-# (this code adapted from https://github.com/iceychris/edge-popup)
-class Conv2dSubnet(nn.Conv2d):
+      self.initial_popup_scores = new_popup_init
 
-    def __init__(self, *args, k=K, init=signed_kaiming_constant_, **kwargs):
-        super(Conv2dSubnet, self).__init__(*args, **kwargs)
-        self.k = k
-        self.popup_scores = nn.Parameter(torch.randn(*self.weight.shape))
-
-        # init weights
-        init(self.weight, k=k)
-
-        # disable grad for the original parameters
-        self.weight.requires_grad_(False)
-        if self.bias is not None:
-            self.bias.requires_grad_(False)
-
-    # self.k is the % of weights remaining, a real number in [0,1]
-    # self.popup_scores is a Parameter which has the same shape as self.weight
-    # Gradients to self.weight, self.bias have been turned off.
-    def forward(self, x):
-        # Get the subnetwork by sorting the scores.
-        adj = GetSubnet.apply(self.popup_scores.abs(), self.k)
-
-        # Use only the subnetwork in the forward pass.
-        w = self.weight * adj
-        x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
-        return x
+      return self.popup_scores
 
 
-# Our maskable replacement for the standard batchnorm2d layer in torch.
-# See the paper "What's Hidden in a Randomly Weighted Neural Network?" for
-# more details (https://arxiv.org/abs/1911.13299)
-# (this code adapted from https://github.com/iceychris/edge-popup)
-# class BatchNorm2dSubnet(nn.BatchNorm2d):
 
-#     def __init__(self, *args, k=K, **kwargs):
-#         super(nn.BatchNorm2d, self).__init__(*args, **kwargs)
-#         self.k = k
-#         self.popup_scores = nn.Parameter(torch.randn(*self.weight.shape))
-
-#         # init weights
-#         init(self.weight, k=k)
-
-#         # disable grad for the original parameters
-#         self.weight.requires_grad_(False)
-#         if self.bias is not None:
-#             self.bias.requires_grad_(False)
-
-#     # self.k is the % of weights remaining, a real number in [0,1]
-#     # self.popup_scores is a Parameter which has the same shape as self.weight
-#     # Gradients to self.weight, self.bias have been turned off.
-#     def forward(self, x):
-#         # Get the subnetwork by sorting the scores.
-#         adj = GetSubnet.apply(self.popup_scores.abs(), self.k)
-
-#         # Use only the subnetwork in the forward pass.
-#         w = self.weight * adj
-#         x = F.batch_norm(x, self.running_mean, self.running_var, weight=w, bias=self.bias, momentum=0.1, eps=1e-05)
-#         return x
-
-# Our network builder, largely for convenience in testing.  It sets up a linear
-# relu stack from a list of layer sizes.  It has an optional argument called
-# "maskable" that, if true, will use our maskable linear layers instead of the
-# stock linear layers in torch.
 class Network(nn.Module):
-    def __init__(self, layer_sizes, maskable=False, k=K, init=signed_kaiming_constant_):
+    def __init__(self, layer_sizes, maskable=False, k=K, sparsity=0., zeroTrack=0,init=signed_kaiming_constant_):
         super().__init__()
         self.flatten = nn.Flatten()
+
         # self.router = None
         if maskable:
-            if isinstance(k, (int, float)):
+            if isinstance(k, (int, float)): #MODIFIED to include the sparsity and zeroTrack
                 self.linear_relu_stack = nn.Sequential(
-                    *[m for m in [z for l in layer_sizes for z in [LinearSubnet(l[0], l[1], k=k), nn.ReLU()]][:-1]])
+                    *[m for m in [z for l in layer_sizes
+                                  for z in [LinearSubnet(l[0], l[1], k=k, sparsity=sparsity, zeroTrack=zeroTrack), nn.ReLU()]][:-1]])
             else:
                 self.linear_relu_stack = nn.Sequential(
-                    *[m for m in [z for ind, l in enumerate(layer_sizes) for z in
-                                  [LinearSubnet(l[0], l[1], k=k[ind], ), nn.ReLU()]][:-1]])
+                    *[m for m in [z for ind, l in enumerate(layer_sizes)
+                                  for z in [LinearSubnet(l[0], l[1], k=k[ind], sparsity=sparsity, zeroTrack=zeroTrack), nn.ReLU()]][:-1]])
         else:
             self.linear_relu_stack = nn.Sequential(
                 *[m for m in [z for l in layer_sizes for z in [nn.Linear(l[0], l[1]), nn.ReLU()]][:-1]])
+
+    def count_nonzero_weights(self):
+      total_nonzeros = 0
+      for layer in self.linear_relu_stack:
+        if hasattr(layer, 'weight'):  # Works for LinearSubnet or nn.Linear
+            total_nonzeros += (layer.weight != 0).sum().item()
+      return total_nonzeros
+
+    def count_total_weights(self):
+      total = 0
+      for layer in self.linear_relu_stack:
+        if hasattr(layer, 'weight'):
+            total += layer.weight.numel()
+      return total
+
+    def count_total_popup_scores(model):
+      total_scores = 0
+      for layer in model.linear_relu_stack:
+        if isinstance(layer, LinearSubnet) and hasattr(layer, 'popup_scores'):
+            total_scores += layer.popup_scores.numel()
+      return total_scores
+
 
     def forward(self, x):
         x = self.flatten(x)
